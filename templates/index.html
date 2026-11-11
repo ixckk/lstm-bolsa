@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LSTM Bolsa</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #151b23; --line: #262f3a; --text: #e6edf3; --muted: #8b98a8;
+    --accent: #3fb950; --pred: #f0883e; --real: #58a6ff; --band: rgba(240,136,62,.18); --bad: #f85149;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 "IBM Plex Sans", system-ui, sans-serif; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 28px 16px 60px; }
+  header h1 { font: 600 26px "IBM Plex Mono", monospace; margin: 0; letter-spacing: -.5px; }
+  header h1 span { color: var(--accent); }
+  header p { color: var(--muted); margin: 6px 0 22px; max-width: 760px; }
+  form { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; align-items: end;
+         background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+  input, select { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 9px 10px;
+                  font: 500 15px "IBM Plex Mono", monospace; width: 100%; }
+  input:focus, select:focus { outline: 2px solid var(--real); outline-offset: -1px; }
+  button { background: var(--accent); color: #04130a; border: 0; border-radius: 6px; padding: 11px 14px; font: 600 15px "IBM Plex Sans";
+           cursor: pointer; }
+  button:disabled { opacity: .55; cursor: progress; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin: 12px 0 0; }
+  .chip { background: transparent; color: var(--muted); border: 1px solid var(--line); padding: 4px 10px; font: 500 13px "IBM Plex Mono"; border-radius: 99px; }
+  .chip:hover { color: var(--text); border-color: var(--muted); }
+  .status { margin: 16px 0; color: var(--muted); font-family: "IBM Plex Mono"; min-height: 22px; }
+  .status.err { color: var(--bad); }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .kpi { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+  .kpi .l { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+  .kpi .v { font: 600 24px "IBM Plex Mono"; margin-top: 2px; }
+  .kpi .s { font-size: 13px; color: var(--muted); }
+  .up { color: var(--accent); } .down { color: var(--bad); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+  .card h2 { font-size: 15px; font-weight: 600; margin: 0 0 2px; }
+  .card .sub { color: var(--muted); font-size: 13px; margin-bottom: 10px; }
+  .chart { position: relative; height: 340px; }
+  .grid2 { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; }
+  @media (max-width: 820px) { .grid2 { grid-template-columns: 1fr; } .chart { height: 270px; } }
+  .note { color: var(--muted); font-size: 13px; border-left: 3px solid var(--pred); padding: 4px 12px; margin-top: 20px; }
+  #results { display: none; }
+  .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--muted); border-top-color: transparent;
+             border-radius: 50%; animation: spin .8s linear infinite; vertical-align: -1px; margin-right: 6px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>LSTM<span>/</span>bolsa</h1>
+    <p>Red neuronal recurrente (LSTM, PyTorch) entrenada en vivo sobre precios diarios reales de Yahoo Finance.
+       Predice el log-retorno del día siguiente y se compara contra un baseline ingenuo (“mañana = hoy”).</p>
+  </header>
+
+  <form id="f">
+    <label>Ticker <input name="ticker" value="AAPL" required></label>
+    <label>Histórico
+      <select name="period"><option>2y</option><option selected>5y</option><option>10y</option><option>max</option></select>
+    </label>
+    <label>Ventana (días) <input name="window" type="number" value="30" min="5" max="120"></label>
+    <label>Épocas <input name="epochs" type="number" value="40" min="1" max="200"></label>
+    <label>Neuronas <input name="hidden" type="number" value="64" min="8" max="256"></label>
+    <label>Horizonte (días) <input name="horizon" type="number" value="10" min="1" max="60"></label>
+    <button id="go" type="submit">Entrenar y predecir</button>
+  </form>
+  <div class="chips" id="chips"></div>
+
+  <div class="status" id="status"></div>
+
+  <section id="results">
+    <div class="kpis" id="kpis"></div>
+    <div class="card">
+      <h2>Precio real vs. predicción del LSTM</h2>
+      <div class="sub" id="mainSub"></div>
+      <div class="chart"><canvas id="cMain"></canvas></div>
+    </div>
+    <div class="grid2">
+      <div class="card">
+        <h2>Pronóstico futuro</h2>
+        <div class="sub">Predicción recursiva · banda p10–p90 por Monte Carlo Dropout</div>
+        <div class="chart"><canvas id="cFc"></canvas></div>
+      </div>
+      <div class="card">
+        <h2>Curva de aprendizaje</h2>
+        <div class="sub">Pérdida Huber (train / validación)</div>
+        <div class="chart"><canvas id="cLoss"></canvas></div>
+      </div>
+    </div>
+    <p class="note">Proyecto educativo. Los mercados son en gran parte impredecibles: si el LSTM no supera claramente al baseline
+      ingenuo, no tiene poder predictivo real. Nada de esto es asesoría financiera.</p>
+  </section>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const charts = {};
+Chart.defaults.color = "#8b98a8";
+Chart.defaults.borderColor = "#262f3a";
+Chart.defaults.font.family = "IBM Plex Mono, monospace";
+const fmt = (v, d = 2) => Number(v).toLocaleString("es", { minimumFractionDigits: d, maximumFractionDigits: d });
+
+["AAPL", "MSFT", "NVDA", "TSLA", "SPY", "BTC-USD", "SAN.MC", "^IBEX"].forEach(t => {
+  const b = document.createElement("button");
+  b.type = "button"; b.className = "chip"; b.textContent = t;
+  b.onclick = () => { $("#f").ticker.value = t; $("#f").requestSubmit(); };
+  $("#chips").appendChild(b);
+});
+
+function draw(id, cfg) {
+  charts[id]?.destroy();
+  charts[id] = new Chart(document.getElementById(id), cfg);
+}
+
+const baseOpts = (extra = {}) => ({
+  responsive: true, maintainAspectRatio: false, animation: false,
+  interaction: { mode: "index", intersect: false },
+  plugins: { legend: { labels: { boxWidth: 12 } }, tooltip: { callbacks: { label: c => `${c.dataset.label}: ${fmt(c.parsed.y)}` } } },
+  scales: { x: { ticks: { maxTicksLimit: 6, maxRotation: 0, autoSkipPadding: 24, callback(v) { const s = this.getLabelForValue(v); return typeof s === "string" ? s.slice(2) : s; } } }, y: { ticks: { callback: v => fmt(v, 0) } } },
+  ...extra,
+});
+
+function render(d) {
+  const m = d.metrics;
+  const gain = (1 - m.rmse_lstm / m.rmse_naive) * 100;
+  const fcLast = d.forecast.mean.at(-1);
+  const fcChg = (fcLast / d.last_close - 1) * 100;
+  $("#kpis").innerHTML = `
+    <div class="kpi"><div class="l">${d.ticker} · último cierre</div><div class="v">${fmt(d.last_close)}</div><div class="s">${d.last_date}</div></div>
+    <div class="kpi"><div class="l">Pronóstico +${d.forecast.mean.length}d</div>
+      <div class="v ${fcChg >= 0 ? "up" : "down"}">${fmt(fcLast)}</div><div class="s">${fcChg >= 0 ? "+" : ""}${fmt(fcChg)}% · ${d.forecast.dates.at(-1)}</div></div>
+    <div class="kpi"><div class="l">RMSE test (LSTM / ingenuo)</div><div class="v">${fmt(m.rmse_lstm)}</div>
+      <div class="s">vs ${fmt(m.rmse_naive)} → <span class="${gain > 0 ? "up" : "down"}">${gain > 0 ? "mejora" : "peor"} ${fmt(Math.abs(gain))}%</span></div></div>
+    <div class="kpi"><div class="l">Acierto de dirección</div><div class="v">${fmt(m.dir_acc, 1)}%</div>
+      <div class="s">“siempre sube” daría ${fmt(m.dir_acc_always_up, 1)}%</div></div>
+    <div class="kpi"><div class="l">MAPE test</div><div class="v">${fmt(m.mape_lstm)}%</div>
+      <div class="s">${m.n_train} ventanas train · ${m.n_test} test · ${m.device}</div></div>`;
+
+  $("#mainSub").textContent = `Predicción a 1 día en el periodo de test (desde ${d.split_date}), datos nunca vistos en entrenamiento`;
+
+  // Últimos ~250 días de histórico + test
+  const hStart = Math.max(0, d.history.dates.length - d.test.dates.length - 250);
+  const hDates = d.history.dates.slice(hStart);
+  const predMap = Object.fromEntries(d.test.dates.map((t, i) => [t, d.test.pred[i]]));
+  draw("cMain", {
+    type: "line",
+    data: { labels: hDates, datasets: [
+      { label: "Real", data: d.history.close.slice(hStart), borderColor: "#58a6ff", borderWidth: 1.6, pointRadius: 0 },
+      { label: "LSTM (1 día)", data: hDates.map(t => predMap[t] ?? null), borderColor: "#f0883e", borderWidth: 1.6, pointRadius: 0, spanGaps: false, order: -1 },
+    ]},
+    options: baseOpts(),
+  });
+
+  // Pronóstico: últimos 60 días reales + futuro
+  const tail = 60, hd = d.history.dates.slice(-tail), hc = d.history.close.slice(-tail);
+  const labels = [...hd, ...d.forecast.dates];
+  const pad = Array(tail - 1).fill(null);
+  const join = arr => [...pad, d.last_close, ...arr];
+  draw("cFc", {
+    type: "line",
+    data: { labels, datasets: [
+      { label: "p90", data: join(d.forecast.p90), borderColor: "transparent", pointRadius: 0, fill: "+1", backgroundColor: "rgba(240,136,62,.18)" },
+      { label: "p10", data: join(d.forecast.p10), borderColor: "transparent", pointRadius: 0, fill: false },
+      { label: "Real", data: [...hc, ...Array(d.forecast.dates.length).fill(null)], borderColor: "#58a6ff", borderWidth: 1.6, pointRadius: 0 },
+      { label: "Pronóstico", data: join(d.forecast.mean), borderColor: "#f0883e", borderWidth: 2, borderDash: [5, 4], pointRadius: 0 },
+    ]},
+    options: baseOpts({ plugins: { ...baseOpts().plugins, legend: { labels: { boxWidth: 12, filter: i => !i.text.startsWith("p") } } } }),
+  });
+
+  draw("cLoss", {
+    type: "line",
+    data: { labels: d.loss.map(l => l.epoch), datasets: [
+      { label: "Train", data: d.loss.map(l => l.train), borderColor: "#3fb950", borderWidth: 1.6, pointRadius: 0 },
+      { label: "Validación", data: d.loss.map(l => l.val), borderColor: "#d2a8ff", borderWidth: 1.6, pointRadius: 0 },
+    ]},
+    options: baseOpts({ scales: { x: { title: { display: true, text: "época" } }, y: { ticks: { callback: v => fmt(v, 3) } } } }),
+  });
+
+  $("#results").style.display = "block";
+}
+
+$("#f").addEventListener("submit", async e => {
+  e.preventDefault();
+  const body = Object.fromEntries(new FormData(e.target));
+  $("#go").disabled = true;
+  const st = $("#status");
+  st.className = "status";
+  st.innerHTML = `<span class="spinner"></span>Descargando ${body.ticker.toUpperCase()} y entrenando LSTM (${body.epochs} épocas)…`;
+  const t0 = performance.now();
+  try {
+    const r = await fetch("/api/predict", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || r.statusText);
+    render(d);
+    st.textContent = `✓ Entrenado en ${fmt((performance.now() - t0) / 1000, 1)} s`;
+  } catch (err) {
+    st.className = "status err";
+    st.textContent = "Error: " + err.message;
+  } finally {
+    $("#go").disabled = false;
+  }
+});
+</script>
+</body>
+</html>
